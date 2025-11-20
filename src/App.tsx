@@ -78,19 +78,60 @@ function App() {
         const bufferSize = 2048;
 
         processor = audioCtx.createScriptProcessor(bufferSize, 1, 1);
-        processor.onaudioprocess = (event) => {
-          const input = event.inputBuffer.getChannelData(0);
-          const freq = detectPitch(input, audioCtx!.sampleRate);
 
-          if (freq) {
-            setFrequency(freq);
-            const note = frequencyToNote(freq);
-            setNoteName(note ? note.name : null);
-          } else {
-            setFrequency(null);
-            setNoteName(null);
-          }
-        };
+// smoothing + hold logic
+let recentFreqs: number[] = [];
+let lastGoodFreq: number | null = null;
+let lastGoodTime = 0;
+let nullFrameCount = 0;
+const frameDurationMs = (bufferSize / audioCtx.sampleRate) * 1000;
+const HOLD_MS = 250;        // how long to keep last note after signal drops
+const WINDOW = 5;           // how many frames to smooth over
+
+processor.onaudioprocess = (event) => {
+  const input = event.inputBuffer.getChannelData(0);
+  const rawFreq = detectPitch(input, audioCtx!.sampleRate);
+  const now = performance.now();
+
+  if (rawFreq) {
+    // we got a pitch this frame
+    nullFrameCount = 0;
+    lastGoodTime = now;
+
+    // add to smoothing window
+    recentFreqs.push(rawFreq);
+    if (recentFreqs.length > WINDOW) {
+      recentFreqs.shift();
+    }
+
+    // median smoothing
+    const sorted = [...recentFreqs].sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)];
+
+    lastGoodFreq = median;
+    setFrequency(median);
+
+    const note = frequencyToNote(median);
+    setNoteName(note ? note.name : null);
+  } else {
+    // no pitch detected for this frame
+    nullFrameCount++;
+
+    // if we recently had a good note, keep showing it for a bit
+    if (lastGoodFreq && now - lastGoodTime < HOLD_MS) {
+      return; // do nothing, keep last note on screen
+    }
+
+    // if we've been "null" for long enough, clear the display
+    if (nullFrameCount * frameDurationMs > HOLD_MS) {
+      lastGoodFreq = null;
+      recentFreqs = [];
+      setFrequency(null);
+      setNoteName(null);
+    }
+  }
+};
+
 
         source.connect(processor);
         processor.connect(audioCtx.destination); // you can omit this if you don't want monitoring
