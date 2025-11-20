@@ -14,7 +14,7 @@ export function detectPitch(
     sumSquares += val * val;
   }
   const rms = Math.sqrt(sumSquares / SIZE);
-  if (rms < 0.01) {
+  if (rms < 0.005) {
     // too quiet / silence
     return null;
   }
