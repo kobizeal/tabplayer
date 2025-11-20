@@ -1,35 +1,201 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from '/vite.svg'
-import './App.css'
+import { useEffect, useState } from "react";
+import { detectPitch } from "./pitch";
 
-function App() {
-  const [count, setCount] = useState(0)
-
-  return (
-    <>
-      <div>
-        <a href="https://vite.dev" target="_blank">
-          <img src={viteLogo} className="logo" alt="Vite logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <h1>Vite + React</h1>
-      <div className="card">
-        <button onClick={() => setCount((count) => count + 1)}>
-          count is {count}
-        </button>
-        <p>
-          Edit <code>src/App.tsx</code> and save to test HMR
-        </p>
-      </div>
-      <p className="read-the-docs">
-        Click on the Vite and React logos to learn more
-      </p>
-    </>
-  )
+interface AudioInputDevice {
+  deviceId: string;
+  label: string;
 }
 
-export default App
+function frequencyToNote(freq: number): { name: string; midi: number } | null {
+  if (!freq || freq <= 0) return null;
+
+  const midi = Math.round(69 + 12 * Math.log2(freq / 440));
+  if (midi < 0 || midi > 127) return null;
+
+  const noteNames = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+  const name = noteNames[midi % 12];
+  const octave = Math.floor(midi / 12) - 1;
+
+  return { name: `${name}${octave}`, midi };
+}
+
+function App() {
+  const [devices, setDevices] = useState<AudioInputDevice[]>([]);
+  const [deviceError, setDeviceError] = useState<string | null>(null);
+  const [selectedDevice, setSelectedDevice] = useState<string>("");
+
+  const [frequency, setFrequency] = useState<number | null>(null);
+  const [noteName, setNoteName] = useState<string | null>(null);
+  const [audioError, setAudioError] = useState<string | null>(null);
+  const [isListening, setIsListening] = useState(false);
+
+  // 1) Get list of audio input devices
+  useEffect(() => {
+    async function getDevices() {
+      try {
+        // Request permission once so we can see device labels
+        await navigator.mediaDevices.getUserMedia({ audio: true });
+
+        const all = await navigator.mediaDevices.enumerateDevices();
+        const inputs = all
+          .filter((d) => d.kind === "audioinput")
+          .map((d) => ({
+            deviceId: d.deviceId,
+            label: d.label || "Audio input",
+          }));
+        setDevices(inputs);
+      } catch (e: any) {
+        setDeviceError(e?.message || "Could not access audio devices");
+      }
+    }
+    getDevices();
+  }, []);
+
+  // 2) Start audio processing whenever a device is selected
+  useEffect(() => {
+    if (!selectedDevice) return;
+
+    let audioCtx: AudioContext | null = null;
+    let processor: ScriptProcessorNode | null = null;
+    let stream: MediaStream | null = null;
+
+    const start = async () => {
+      try {
+        setAudioError(null);
+        setIsListening(true);
+
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            deviceId: { exact: selectedDevice },
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+          },
+        });
+
+        audioCtx = new AudioContext();
+        const source = audioCtx.createMediaStreamSource(stream);
+        const bufferSize = 2048;
+
+        processor = audioCtx.createScriptProcessor(bufferSize, 1, 1);
+        processor.onaudioprocess = (event) => {
+          const input = event.inputBuffer.getChannelData(0);
+          const freq = detectPitch(input, audioCtx!.sampleRate);
+
+          if (freq) {
+            setFrequency(freq);
+            const note = frequencyToNote(freq);
+            setNoteName(note ? note.name : null);
+          } else {
+            setFrequency(null);
+            setNoteName(null);
+          }
+        };
+
+        source.connect(processor);
+        processor.connect(audioCtx.destination); // you can omit this if you don't want monitoring
+      } catch (e: any) {
+        setAudioError(e?.message || "Error starting audio");
+        setIsListening(false);
+      }
+    };
+
+    start();
+
+    return () => {
+      processor?.disconnect();
+      if (audioCtx && audioCtx.state !== "closed") {
+        audioCtx.close();
+      }
+      stream?.getTracks().forEach((t) => t.stop());
+      setIsListening(false);
+    };
+  }, [selectedDevice]);
+
+  return (
+    <div
+      style={{
+        minHeight: "100vh",
+        padding: "2rem",
+        fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+        background: "#0f172a",
+        color: "#e5e7eb",
+      }}
+    >
+      <h1 style={{ fontSize: "2rem", marginBottom: "1rem" }}>Guitar Trainer – Prototype</h1>
+      <p style={{ marginBottom: "2rem", color: "#9ca3af" }}>
+        Plug your electric guitar into an audio interface, select it below, and pluck a single note.
+      </p>
+
+      <section
+        style={{
+          marginBottom: "2rem",
+          padding: "1.5rem",
+          borderRadius: "0.75rem",
+          background: "#111827",
+          border: "1px solid #1f2937",
+        }}
+      >
+        <h2 style={{ marginBottom: "0.75rem", fontSize: "1.2rem" }}>
+          1. Choose your guitar input device
+        </h2>
+        {deviceError && <p style={{ color: "#f87171" }}>{deviceError}</p>}
+
+        {devices.length === 0 ? (
+          <p>No audio inputs found. Make sure your interface is plugged in and allow mic access.</p>
+        ) : (
+          <select
+            value={selectedDevice}
+            onChange={(e) => setSelectedDevice(e.target.value)}
+            style={{
+              padding: "0.5rem 0.75rem",
+              borderRadius: "0.5rem",
+              border: "1px solid #4b5563",
+              background: "#020617",
+              color: "#e5e7eb",
+            }}
+          >
+            <option value="">Select audio input…</option>
+            {devices.map((d) => (
+              <option key={d.deviceId} value={d.deviceId}>
+                {d.label}
+              </option>
+            ))}
+          </select>
+        )}
+      </section>
+
+      <section
+        style={{
+          padding: "1.5rem",
+          borderRadius: "0.75rem",
+          background: "#111827",
+          border: "1px solid #1f2937",
+        }}
+      >
+        <h2 style={{ marginBottom: "0.75rem", fontSize: "1.2rem" }}>2. Live pitch</h2>
+        {audioError && <p style={{ color: "#f87171" }}>{audioError}</p>}
+        {!selectedDevice && <p>Select a device to start listening.</p>}
+
+        {selectedDevice && (
+          <>
+            <p style={{ marginBottom: "0.5rem" }}>
+              Status:{" "}
+              <span style={{ color: isListening ? "#4ade80" : "#f97316" }}>
+                {isListening ? "Listening…" : "Idle"}
+              </span>
+            </p>
+            <p style={{ fontSize: "1.5rem", marginBottom: "0.25rem" }}>
+              {noteName ? noteName : "—"}
+            </p>
+            <p style={{ color: "#9ca3af" }}>
+              {frequency ? `${frequency.toFixed(1)} Hz` : "Play a single note on your guitar…"}
+            </p>
+          </>
+        )}
+      </section>
+    </div>
+  );
+}
+
+export default App;
